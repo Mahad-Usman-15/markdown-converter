@@ -10,6 +10,7 @@ from app.config import Settings
 from app.errors import ConversionError
 from app.security import validate_url
 from app.converters import website, pdf
+from app.core.lifespan import lifespan
 
 class BodyLimitExceeded(Exception): pass
 
@@ -31,8 +32,11 @@ class RequestBodyLimit:
 
 def create_app(settings=None):
     settings=settings or Settings()
-    app=FastAPI(title="Markdown Converter",version="1.0.0",docs_url="/api/docs",openapi_url="/api/openapi.json")
-    jobs={}; lock=RLock(); submissions=[]; active=0; temp_root=None; processes={}
+    app=FastAPI(title="Markdown Converter",version="1.0.0",docs_url="/api/docs",openapi_url="/api/openapi.json",lifespan=lifespan)
+    jobs={}; lock=RLock(); submissions=[]; active=0; processes={}
+    app.state.settings=settings
+    app.state.processes=processes
+    temp_root=None
 
     @app.middleware("http")
     async def secure_requests(request, call_next):
@@ -54,26 +58,6 @@ def create_app(settings=None):
         return response
 
     app.add_middleware(RequestBodyLimit,limit=settings.max_pdf_bytes+65536)
-
-    @app.on_event("startup")
-    async def startup():
-        nonlocal temp_root
-        if not (settings.frontend_dir/"index.html").is_file(): raise RuntimeError("Build frontend/dist before starting the server.")
-        if settings.pdf_enabled and not (settings.model_dir/"ready.json").is_file():
-            raise RuntimeError("PDF models are missing. Run backend/scripts/prepare_models.py, or set MC_PDF_ENABLED=false for website-only work.")
-        temp_root=Path(tempfile.mkdtemp(prefix="markdown-converter-"))
-        app.state.processes=processes
-
-    @app.on_event("shutdown")
-    async def shutdown():
-        for proc in list(processes.values()):
-            if proc.poll() is None:
-                try:
-                    if os.name=="posix": os.killpg(proc.pid,signal.SIGKILL)
-                    else: proc.kill()
-                except ProcessLookupError: pass
-                proc.wait()
-        if temp_root: shutil.rmtree(temp_root,ignore_errors=True)
 
     @app.get("/api/health")
     async def health(): return {"status":"ready","pdf_available":settings.pdf_enabled,"browser_fallback":False}

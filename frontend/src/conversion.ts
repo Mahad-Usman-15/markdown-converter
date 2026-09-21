@@ -1,11 +1,11 @@
 export type InputKind = 'pdf' | 'website' | 'text';
-export type Limits = { max_pdf_bytes?: number; max_text_chars?: number; max_txt_bytes?: number };
+export type Limits = { max_pdf_bytes?: number; max_pdf_pages?: number; max_text_chars?: number; max_txt_bytes?: number; pdf_available?: boolean };
 export type Result = { markdown: string; title?: string; warnings?: string[] };
-const base = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '');
+const base = (import.meta.env.VITE_API_BASE_URL || '/api').replace(/\/$/, '');
 export const apiConfigured = !!base;
 export async function getLimits(signal: AbortSignal): Promise<Limits> {
   if (!base) return {};
-  const r = await fetch(`${base}/config`, { signal });
+  const r = await fetch(`${base}/config`, { signal: AbortSignal.any([signal, AbortSignal.timeout(15000)]) });
   if (!r.ok) throw new Error('Could not load upload limits. Please retry.');
   return r.json();
 }
@@ -30,8 +30,13 @@ export async function convertRemote(kind: InputKind, file: File | null, url: str
   if (file && kind === 'pdf') data.set('file', file);
   if (kind === 'website') data.set('url', url.trim());
   stage(kind === 'pdf' ? 'Uploading your PDF…' : 'Reading the webpage…');
-  const response = await fetch(`${base}/conversions`, { method: 'POST', body: data, signal });
-  if (!response.ok) throw new Error(response.status === 413 ? 'This input exceeds the supported size. Try a smaller file.' : 'Could not start conversion. Check your input and try again.');
+  let response: Response;
+  try { response = await fetch(`${base}/conversions`, { method: 'POST', body: data, signal: AbortSignal.any([signal, AbortSignal.timeout(90000)]) }); }
+  catch { throw new Error('Could not reach the conversion service. Please try again.'); }
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(typeof error.message === 'string' ? error.message : 'Could not start conversion. Check your input and try again.');
+  }
   const { job_id } = await response.json();
   if (typeof job_id !== 'string' || !job_id) throw new Error('The conversion service returned an invalid job. Please retry.');
   const deadline = Date.now() + 15 * 60 * 1000;
@@ -39,7 +44,7 @@ export async function convertRemote(kind: InputKind, file: File | null, url: str
   while (Date.now() < deadline) {
     await wait(1500, signal);
     let r: Response;
-    try { r = await fetch(`${base}/conversions/${encodeURIComponent(job_id)}`, { signal }); }
+    try { r = await fetch(`${base}/conversions/${encodeURIComponent(job_id)}`, { signal: AbortSignal.any([signal, AbortSignal.timeout(15000)]) }); }
     catch (e) { if (signal.aborted) throw e; if (++failures > 4) throw new Error('Connection lost. Please try again.'); stage('Reconnecting…'); continue; }
     if ([404, 410].includes(r.status)) throw new Error('This conversion was interrupted. Please try again.');
     if (r.status >= 500 && ++failures <= 4) { stage('Reconnecting…'); continue; }
